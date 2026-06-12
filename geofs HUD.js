@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoFS 飞行HUD插件
 // @namespace    https://www.geo-fs.com/geofs.php?v=3.9
-// @version      5.7.3
-// @description  战斗机风格HUD | 颜色自选 | 双数据显示 | 离地高度 | 开源免费 | 按L开关
+// @version      5.8.0
+// @description  战斗机风格HUD | 颜色自选 | 双数据显示 | 离地高度 | 姿态方向最终修复 | 按L开关
 // @author       不宅的飞友
 // @match        https://*/*
 // @grant        none
@@ -123,9 +123,21 @@ function getAGL(){
 function altMain(){ return H.mainAlt === 'MSL' ? getMSL() : getAGL(); }
 function altSub(){ return H.mainAlt === 'MSL' ? getAGL() : getMSL(); }
 
+// ==================== 姿态函数（最终方向修复） ====================
 function vs(){try{let a=ac();return (a?.velocity?.[2]||0)*196.85}catch(e){return 0}}
-function pitch(){try{let a=ac();return -(a?.htr?.[1]||0)}catch(e){return 0}}
-function roll(){try{let a=ac();return a?.htr?.[2]||0}catch(e){return 0}}
+function pitch(){
+    try{
+        let a = ac();
+        // 取反：使拉杆（抬头）为正，推杆（低头）为负
+        return -(a?.htr?.[1] || 0);
+    }catch(e){return 0}
+}
+function roll(){
+    try{
+        let a = ac();
+        return a?.htr?.[2] || 0;
+    }catch(e){return 0}
+}
 function hdg(){try{let a=ac(),h=a?.htr?.[0]||0;while(h<0)h+=360;while(h>=360)h-=360;return h}catch(e){return 0}}
 function gForce(){
     let a=ac();if(!a)return 1;
@@ -206,7 +218,7 @@ function draw(){
 
     // 高度带
     ctx.save();
-    if(H.bg){ctx.fillStyle='rgba(0,0,0,0.4)';ctx.fillRect(460,cy-120,120,240);}
+    if(H.bg){ctx.fillStyle='rgba(0,0,0,0.4)';ctx.fillRect(460,cy-120,130,240);}
     ctx.fillStyle=H.mainColor;
     ctx.strokeStyle=H.mainColor;
     ctx.font='14px monospace';
@@ -228,67 +240,78 @@ function draw(){
     ctx.globalAlpha=H.o;
     ctx.font='bold 34px monospace';
     ctx.fillStyle=H.mainColor;
-    ctx.fillText(Math.round(a),520,cy+10);
+    ctx.fillText(Math.round(a),540,cy+10);
     ctx.font='12px monospace';
-    ctx.fillText('ft',595,cy+10);
+    ctx.fillText('ft',610,cy+10);
     // 副高度显示
     let subAlt = altSub();
     let subAltLabel = H.mainAlt === 'MSL' ? 'AGL' : 'MSL';
     ctx.font='12px monospace';
-    ctx.fillText(`${subAltLabel}: ${Math.round(subAlt)}`, 520, cy+40);
+    ctx.fillText(`${subAltLabel}: ${Math.round(subAlt)}`, 540, cy+40);
     ctx.restore();
 
-    // 姿态仪
+    // 姿态仪（方向已校准）
     ctx.save();
-    ctx.translate(cx,cy);
-    let pClamp=Math.min(90,Math.max(-90,p));
-    let horY = pClamp * H.pitchSpacing * 0.73;
-    ctx.rotate(r*Math.PI/180);
+    ctx.translate(cx, cy);
+    ctx.rotate(r * Math.PI / 180);
+
+    // 间距映射：1=原5(最密), 3=标准, 5=最疏
+    let spacingMap = [0, 0.7, 0.85, 1.0, 1.15, 1.3];
+    let factor = spacingMap[H.pitchSpacing] || 1.0;
+    let basePxPerDegree = 3.6;
+    let pitchPx = p * factor * basePxPerDegree;
+    let lineSpacing = basePxPerDegree * factor;
+
     ctx.beginPath();
-    ctx.strokeStyle=H.mainColor;
-    ctx.lineWidth=1.8;
-    ctx.font='bold 12px monospace';
-    ctx.fillStyle=H.mainColor;
-    ctx.textAlign='center';
+    ctx.strokeStyle = H.mainColor;
+    ctx.lineWidth = 1.8;
+    ctx.font = 'bold 12px monospace';
+    ctx.fillStyle = H.mainColor;
+    ctx.textAlign = 'center';
 
     let step = H.pitchStep;
     let bigStep = step * 3;
-    for(let d=-90;d<=90;d+=step){
-        let y = horY - d * H.pitchSpacing;
-        let distanceFromCenter = Math.abs(y) / 180;
-        let alpha = Math.max(0.1, 1 - distanceFromCenter * 0.8);
-        if(y<-180 || y>180){
-            continue;
+    for (let d = -90; d <= 90; d += step) {
+        // 抬头(p为正)时线向下移动，低头(p为负)时线向上移动
+        let y = pitchPx - (d / step) * lineSpacing * step;
+
+        // 渐隐效果
+        let distanceFromCenter = Math.abs(y - pitchPx) / 200;
+        let alpha = Math.max(0.1, 1 - distanceFromCenter * 0.9);
+        if (Math.abs(y) > 160) {
+            alpha = Math.max(0, alpha * (1 - (Math.abs(y) - 160) / 40));
         }
-        if(y<-160 || y>160){
-            alpha = 0.15;
+        if (Math.abs(y) > 200) continue;
+
+        ctx.globalAlpha = H.o * alpha;
+
+        let len = 28;
+        if (d % bigStep === 0) {
+            len = 85;
+            if (d === 0) len = 110;
+        } else {
+            len = 45;
         }
-        ctx.globalAlpha=H.o * alpha;
-        let len=28;
-        if(d % bigStep === 0){
-            len=85;
-            if(d===0) len=95;
-        }else{
-            len=45;
-        }
-        ctx.moveTo(-len,y);
-        ctx.lineTo(len,y);
+        ctx.moveTo(-len, y);
+        ctx.lineTo(len, y);
         ctx.stroke();
-        if(d!==0 && d % bigStep === 0){
-            ctx.fillText(d.toString(),-len-18,y+4);
-            ctx.fillText(d.toString(),len+18,y+4);
+
+        if (d !== 0 && d % bigStep === 0) {
+            ctx.fillText(d.toString(), -len - 18, y + 4);
+            ctx.fillText(d.toString(), len + 18, y + 4);
         }
-        if(d===0){
-            ctx.fillText('0',-75,y-5);
-            ctx.fillText('0',75,y-5);
+        if (d === 0) {
+            ctx.fillText('0', -85, y - 5);
+            ctx.fillText('0', 85, y - 5);
         }
     }
-    ctx.globalAlpha=H.o;
+    ctx.globalAlpha = H.o;
     ctx.restore();
 
     // 十字架
+    let crossAlpha = Math.min(1.0, H.o + 0.25);
     ctx.save();
-    ctx.translate(cx,cy);
+    ctx.translate(cx, cy);
     ctx.beginPath();
     ctx.moveTo(-28,0);
     ctx.lineTo(28,0);
@@ -296,6 +319,7 @@ function draw(){
     ctx.lineTo(0,28);
     ctx.strokeStyle=H.mainColor;
     ctx.lineWidth=2.5;
+    ctx.globalAlpha=crossAlpha;
     ctx.stroke();
     ctx.globalCompositeOperation='destination-out';
     ctx.beginPath();
@@ -309,6 +333,7 @@ function draw(){
     ctx.font='13px monospace';
     ctx.fillStyle=H.mainColor;
     ctx.textAlign='left';
+    ctx.globalAlpha=H.o;
     let vsSign=vs_>0?'+':'';
     ctx.fillText(vsSign+Math.round(Math.abs(vs_))+' fpm',cx-150,cy+90);
     ctx.fillText(g.toFixed(1)+' G',cx-150,cy+115);
@@ -320,6 +345,7 @@ function draw(){
     ctx.font='bold 22px monospace';
     ctx.fillStyle=H.mainColor;
     ctx.textAlign='center';
+    ctx.globalAlpha=H.o;
     ctx.fillText(Math.round(hd).toString()+'°',cx+200,cy+90);
     ctx.restore();
 
@@ -331,6 +357,7 @@ function draw(){
     ctx.font='11px monospace';
     ctx.fillStyle=H.mainColor;
     ctx.textAlign='center';
+    ctx.globalAlpha=H.o;
     let sh=Math.floor(hd/10)*10-80;
     for(let h=sh;h<=sh+160;h+=10){
         let hm=h%360;if(hm<0)hm+=360;
@@ -346,7 +373,8 @@ function draw(){
     ctx.font='10px monospace';
     ctx.fillStyle=H.mainColor;
     ctx.textAlign='left';
-    ctx.fillText('HUD v5.7.3',cx+200,cy+115);
+    ctx.globalAlpha=H.o;
+    ctx.fillText('HUD v5.8.0',cx+200,cy+115);
     ctx.restore();
 
     ctx.restore();
@@ -366,7 +394,7 @@ function showPanel(){
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>速度带滚动</span><input type="range" id="spd_s" min="0.5" max="3.0" step="0.1" style="flex:1;margin:0 10px;"><input type="number" id="spd_n" step="0.1" style="width:55px;"></label></div>
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>高度带滚动(x10)</span><input type="range" id="alt_s" min="0.5" max="5.0" step="0.1" style="flex:1;margin:0 10px;"><input type="number" id="alt_n" step="0.1" style="width:55px;"></label></div>
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>姿态仪单格角度</span><select id="pitchStep" style="width:80px;"><option value="5" ${H.pitchStep===5?'selected':''}>5度</option><option value="10" ${H.pitchStep===10?'selected':''}>10度</option></select></label></div>
-        <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>姿态仪线条间距</span><input type="range" id="pitchSpacing" min="1" max="5" step="1" style="flex:1;margin:0 10px;"><input type="number" id="pitchSpacingN" step="1" style="width:55px;"></label></div>
+        <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>姿态仪线条间距</span><input type="range" id="pitchSpacing" min="1" max="5" step="1" value="${H.pitchSpacing}" style="flex:1;margin:0 10px;"><input type="number" id="pitchSpacingN" step="1" style="width:55px;"></label><div style="font-size:9px;color:#888;">1最密 3标准 5最疏</div></div>
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>背景框</span><input type="checkbox" id="bg" ${H.bg?'checked':''} style="width:20px;"></label></div>
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>📊 速度带主显示</span><select id="mainSpd" style="width:100px;"><option value="TAS" ${H.mainSpd==='TAS'?'selected':''}>真空速 (TAS)</option><option value="GS" ${H.mainSpd==='GS'?'selected':''}>地速 (GS)</option></select></label><div style="font-size:9px;color:#888;margin-top:-4px;margin-bottom:6px;">另一种速度以小字显示</div></div>
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>🗻 高度带主显示</span><select id="mainAlt" style="width:100px;"><option value="MSL" ${H.mainAlt==='MSL'?'selected':''}>海拔 (MSL)</option><option value="AGL" ${H.mainAlt==='AGL'?'selected':''}>离地 (AGL)</option></select></label><div style="font-size:9px;color:#888;margin-top:-4px;margin-bottom:6px;">另一种高度以小字显示</div></div>
@@ -383,7 +411,7 @@ function showPanel(){
     document.body.appendChild(panel);
 
     let preS=document.getElementById('pre'),xS=document.getElementById('x_s'),xN=document.getElementById('x_n'),yS=document.getElementById('y_s'),yN=document.getElementById('y_n');
-    let sS=document.getElementById('s_s'),sN=document.getElementById('s_n'),oS=document.getElementById('o_s'),oN=document.getElementById('o_n');
+让SS=文档。getElementById('s_s')，sN=文档。getElementById('s_n')，oS=文档。getElementById('o_s')，oN=文档。getElementById('o_n')；
     let spdS=document.getElementById('spd_s'),spdN=document.getElementById('spd_n'),altS=document.getElementById('alt_s'),altN=document.getElementById('alt_n');
     let pitchStepS=document.getElementById('pitchStep'),pitchSpacingS=document.getElementById('pitchSpacing'),pitchSpacingN=document.getElementById('pitchSpacingN');
     let bgC=document.getElementById('bg');
@@ -424,69 +452,69 @@ function showPanel(){
     pitchSpacingS.oninput=()=>{pitchSpacingN.value=pitchSpacingS.value;upd()};
     pitchSpacingN.oninput=()=>{pitchSpacingS.value=pitchSpacingN.value;upd()};
     bgC.onchange=upd;
-    mainSpdS.onchange=upd;mainAltS.onchange=upd;
+    mainSpdS.onchange=upd;mainAlts.onchange=upd;
     mainColorC.oninput=upd;
 
-    preS.onchange=(e)=>{
-        let p=e.target.value;
-        if(P[p]){
-            let preset=P[p];
-            let nx=preset.getX?.(innerWidth)||preset.x;
-            xS.value=nx;xN.value=nx;
-            yS.value=preset.y;yN.value=preset.y;
-            sS.value=preset.s;sN.value=preset.s;
-            oS.value=preset.o;oN.value=preset.o;
-            spdS.value=preset.spdScroll;spdN.value=preset.spdScroll;
-            altS.value=preset.altScroll*10;altN.value=preset.altScroll*10;
-            pitchStepS.value=preset.pitchStep||5;
-            pitchSpacingS.value=preset.pitchSpacing||3;pitchSpacingN.value=preset.pitchSpacing||3;
-            bgC.checked=preset.bg;
-            mainSpdS.value=preset.mainSpd||'TAS';
-            mainAltS.value=preset.mainAlt||'MSL';
-            mainColorC.value=preset.mainColor||'#14be00';
-            upd(); H.pre=p;
+    Pres.onchange=(e)=>{
+        让 p=e.target.价值;
+        如果(P[p]){
+            让 预设=P[p];
+            让 nx=预设.getX?.(innerWidth)||预设.x;
+            xS.价值=nx;xN.价值=nx;
+            yS.价值=预设.y;yN.价值=预设.y;
+            sS.价值=预设.s;sN.价值=预设.s;
+            oS.价值=预设.o;oN.价值=预设.o;
+            SPDs.价值=预设.spdScroll;spdn.价值=预设.spdScroll;
+            alts.价值=预设.altScroll*10;ALTN.价值=预设.altScroll*10;
+            pitchStepS.价值=预设.pitchStep||5;
+            pitchSpacingS.价值=预设.间距间距||3;pitchSpacingN.价值=预设.间距间距||3;
+            BGC.检查=预设.BG;
+mainSpdS.价值=预设.mainSpd||'TAS'；
+mainAlts.价值=预设.mainAlt||'MSL'；
+mainColorC.价值=预设.mainColor||'#14be00'；
+UPD()；H.预=p；
         }
     };
 
-    document.getElementById('reset').onclick=()=>{
-        let def=P.center_no_ads;
-        let nx=def.getX?.(innerWidth)||def.x;
-        xS.value=nx;xN.value=nx;yS.value=def.y;yN.value=def.y;sS.value=def.s;sN.value=def.s;
-        oS.value=def.o;oN.value=def.o;spdS.value=def.spdScroll;spdN.value=def.spdScroll;
-        altS.value=def.altScroll*10;altN.value=def.altScroll*10;
-        pitchStepS.value=5;pitchSpacingS.value=3;pitchSpacingN.value=3;
-        bgC.checked=def.bg;
-        mainSpdS.value='TAS';mainAltS.value='MSL';
-        mainColorC.value='#14be00';
-        upd(); preS.value='center_no_ads'; H.pre='center_no_ads';
+文件。getElementById('重置').onClick=()=>{
+让def=P.center_no_ads；
+设nx=定义.getx？.(innerWidth)||定义.x；
+XS.值=NX；xN.值=NX；yS.值=定义.y；yn.值=定义.y；SS.值=定义.s；sN.值=定义.s；
+操作系统。value=定义.O；o ON.值=定义.O；电涌保护器.值=定义.spdScroll；spdn.价值=定义.spdScroll；
+alts.价值=定义.altScroll*10；ALTN.值=定义.altScroll*10；
+pitchStepS.值=5；pitchSpacingS.值=3；pitchSpacingN.值=3；
+BGC.检查=定义.bg；
+mainSpdS.价值='TAS'；mainAlts.价值='MSL'；
+mainColorC.价值='#14be00'；
+UPD()；Pres.价值='center_no_ads'；H.预='center_no_ads'；
     };
 
-    document.getElementById('save').onclick=()=>{
-        save();
-        panel.remove();
-        panel=null;
+文件.getElementById('保存').onClick=()=>{
+节省()；
+面板.移除()；
+面板=null；
     };
 }
 
-function init(){
-    load();
-    cv=document.createElement('canvas');cv.id='geo-hud-canvas';
-    cv.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:99999;';
-    cv.width=innerWidth;cv.height=innerHeight;
-    ctx=cv.getContext('2d');document.body.appendChild(cv);
-    document.addEventListener('keydown',(e)=>{
-        let tag=document.activeElement?.tagName||'';
-        if(tag==='INPUT'||tag==='TEXTAREA')return;
-        if(e.key==='l'||e.key==='L'){
-            if(e.shiftKey){e.preventDefault();showPanel();}
-            else if(e.altKey){e.preventDefault();let ks=Object.keys(P),ci=ks.indexOf(H.pre),ni=(ci+1)%ks.length;let p=ks[ni];if(P[p]){let preset=P[p];H.x=preset.getX?.(innerWidth)||preset.x;H.y=preset.y;H.s=preset.s;H.spdScroll=preset.spdScroll;H.altScroll=preset.altScroll;H.pitchStep=preset.pitchStep;H.pitchSpacing=preset.pitchSpacing;H.o=preset.o;H.bg=preset.bg;H.mainSpd=preset.mainSpd||'TAS';H.mainAlt=preset.mainAlt||'MSL';H.mainColor=preset.mainColor||'#14be00';H.pre=p;save();}}
-            else{e.preventDefault();H.v=!H.v;if(cv)cv.style.display=H.v?'block':'none';}
-        }
-    });
-    window.addEventListener('resize',()=>{if(cv){cv.width=innerWidth;cv.height=innerHeight}if(H.pre&&P[H.pre]){H.x=P[H.pre].getX?.(innerWidth)||P[H.pre].x;save()}});
-    (function anim(){draw();requestAnimationFrame(anim)})();
-    console.log(`%c${COPYRIGHT}`, 'color: #4caf50; font-size: 14px; font-weight: bold;');
-    console.log(`%cGeoFS HUD v5.7.3 | L开关 | Shift+L设置 | Alt+L预设 | 颜色自选 | 双数据显示 | 离地高度`, 'color: #ff9800; font-size: 12px;');
+函数init(){
+负载()；
+简历=文件。createElement('画布')；简历。身份标识='geo-hud-canvas'；=文件。createElement('画布')；cv.身份标识='geo-hud-canvas'；
+资历，风格。cssText='位置：固定；顶部：0；左侧：0；宽度：100%；高度：100%；指针事件：无；z索引：99999；'；
+简历.宽度=innerWidth；cv.高度=innerHeight；
+CTX=简历.getContext('2d')；文档。身体。appendChild(简历)；
+文件.addEventListener('按下键'，(e)=>{
+let标记=文件.activeElement？.标记名||"；
+如果(标签==='输入'||标签==='TEXTAREA')返回；
+如果(e.钥匙==='L'||e.钥匙==='L'){
+如果(e.转变键){e.proventDefault()；showPanel()；}
+});
+其他{e.proventDefault()；H.V=！H.v；如果(简历)简历.风格。显示=H.V？'块'：'无'；}
 }
-function wait(){ac()?init():setTimeout(wait,500)}wait();
-})();
+如果(e.转变键){e.proventDefault()；showPanel()；}
+窗户。addEventListener('调整大小'，()=>{如果(简历){简历.宽度=innerWidth；cv.高度=innerHeight}如果(H.预&&P[H.预]){H.X=P[H.预].getx？.(innerWidth)||P[H.预].x；保存()}})；
+(函数Anim(){画()；requestAnimationFrame(Anim)})()；函数Anim(){画()；requestAnimationFrame(Anim)})()；
+控制台.日志('%c${COPYRIGHT}'，'color：#4caf50；font-size:14px；font-weight:bold；')；.日志('%c${COPYRIGHT}'，'color：#4caf50；font-size:14px；font-weight:bold；')；
+控制台.'L'('%cGeoFSHUDV5.8.0|姿态方向最终修复|拉杆抬头线向下'，'color：#ff9800；font-大小:12px；')；.日志('%cGeoFSHUDV5.8.0|姿态方向最终修复|拉杆抬头线向下'，'color：#ff9800；font-大小:12px；')；
+}
+功能wait(){交流电()？初始化()：setTimeout(等等，500)}等待(){交流电()？初始化()：setTimeout(等等，500)}等待()；
+})();)();)();)();
