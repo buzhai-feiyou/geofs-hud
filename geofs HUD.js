@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoFS 飞行HUD插件
 // @namespace    https://www.geo-fs.com/geofs.php?v=3.9
-// @version      5.8.0
-// @description  战斗机风格HUD | 颜色自选 | 双数据显示 | 离地高度 | 姿态方向最终修复 | 按L开关
+// @version      9.0.0
+// @description  战斗机风格HUD | FPV飞行路径矢量 | 自动高度开关 | 帧率可调 | 按L开关
 // @author       不宅的飞友
 // @match        https://*/*
 // @grant        none
@@ -33,16 +33,22 @@ let H={
     pitchStep:5, pitchSpacing:3,
     pre:'center_no_ads',
     mainSpd:'TAS', mainAlt:'MSL',
-    mainColor:'#14be00'
+    mainColor:'#14be00',
+    hudFrameRate:30,
+    fpvEnabled:true, fpvScale:0.5, fpvDistance:15, fpvAutoHeight:5000
 };
 const P={
-    center_no_ads:{name:'无广告中央',getX:(w)=>860,y:100,s:1.4,spdScroll:1.5,altScroll:0.2,pitchStep:5,pitchSpacing:3,o:0.5,bg:false,mainColor:'#14be00',mainSpd:'TAS',mainAlt:'MSL'},
-    center_ads:{name:'有广告中央',getX:(w)=>w/2-400,y:80,s:1.0,spdScroll:1.5,altScroll:0.2,pitchStep:5,pitchSpacing:3,o:0.4,bg:true,mainColor:'#14be00',mainSpd:'TAS',mainAlt:'MSL'},
-    top_left:{name:'左上角',getX:()=>20,y:80,s:0.9,spdScroll:1.5,altScroll:0.2,pitchStep:5,pitchSpacing:3,o:0.4,bg:true,mainColor:'#14be00',mainSpd:'TAS',mainAlt:'MSL'}
+    center_no_ads:{name:'无广告中央',getX:(w)=>860,y:100,s:1.4,spdScroll:1.5,altScroll:0.2,pitchStep:5,pitchSpacing:3,o:0.5,bg:false,mainColor:'#14be00',mainSpd:'TAS',mainAlt:'MSL',hudFrameRate:30,fpvEnabled:true,fpvScale:0.5,fpvDistance:15,fpvAutoHeight:5000},
+    center_ads:{name:'有广告中央',getX:(w)=>w/2-400,y:80,s:1.0,spdScroll:1.5,altScroll:0.2,pitchStep:5,pitchSpacing:3,o:0.4,bg:true,mainColor:'#14be00',mainSpd:'TAS',mainAlt:'MSL',hudFrameRate:30,fpvEnabled:true,fpvScale:0.5,fpvDistance:15,fpvAutoHeight:5000},
+    top_left:{name:'左上角',getX:()=>20,y:80,s:0.9,spdScroll:1.5,altScroll:0.2,pitchStep:5,pitchSpacing:3,o:0.4,bg:true,mainColor:'#14be00',mainSpd:'TAS',mainAlt:'MSL',hudFrameRate:30,fpvEnabled:true,fpvScale:0.5,fpvDistance:15,fpvAutoHeight:5000}
 };
 
 let cv=null,ctx=null,panel=null;
 let lastVSg=0,lastGt=0,smoothG=1;
+
+// FPV 相关变量
+let fpvPoint=null;
+let lastCameraPos=null;
 
 function ac(){return window.geofs?.aircraft?.instance}
 function isGnd(){try{return ac()?.groundContact===true}catch(e){return false}}
@@ -69,11 +75,17 @@ function load(){
     if(H.mainSpd===undefined) H.mainSpd='TAS';
     if(H.mainAlt===undefined) H.mainAlt='MSL';
     if(H.mainColor===undefined) H.mainColor='#14be00';
+    if(H.hudFrameRate===undefined) H.hudFrameRate=30;
+    if(H.fpvEnabled===undefined) H.fpvEnabled=true;
+    if(H.fpvScale===undefined) H.fpvScale=0.5;
+    if(H.fpvDistance===undefined) H.fpvDistance=15;
+    if(H.fpvAutoHeight===undefined) H.fpvAutoHeight=5000;
 }
 function save(){try{localStorage.setItem('geoFS_hud',JSON.stringify({
     x:H.x,y:H.y,s:H.s,o:H.o,bg:H.bg,spdScroll:H.spdScroll,altScroll:H.altScroll,
     pitchStep:H.pitchStep,pitchSpacing:H.pitchSpacing,pre:H.pre,
-    mainSpd:H.mainSpd,mainAlt:H.mainAlt,mainColor:H.mainColor
+    mainSpd:H.mainSpd,mainAlt:H.mainAlt,mainColor:H.mainColor,
+    hudFrameRate:H.hudFrameRate,fpvEnabled:H.fpvEnabled,fpvScale:H.fpvScale,fpvDistance:H.fpvDistance,fpvAutoHeight:H.fpvAutoHeight
 }))}catch(e){}}
 
 // ==================== 速度函数 ====================
@@ -123,13 +135,12 @@ function getAGL(){
 function altMain(){ return H.mainAlt === 'MSL' ? getMSL() : getAGL(); }
 function altSub(){ return H.mainAlt === 'MSL' ? getAGL() : getMSL(); }
 
-// ==================== 姿态函数（最终方向修复） ====================
+// ==================== 姿态函数 ====================
 function vs(){try{let a=ac();return (a?.velocity?.[2]||0)*196.85}catch(e){return 0}}
 function pitch(){
     try{
         let a = ac();
-        // 取反：使拉杆（抬头）为正，推杆（低头）为负
-        return -(a?.htr?.[1] || 0);
+        return a?.htr?.[1] || 0;
     }catch(e){return 0}
 }
 function roll(){
@@ -147,6 +158,96 @@ function gForce(){
 }
 function thrust(){try{let a=ac(),r=a?.engine?.rpm||0;return Math.min(100,Math.round(r/10000*100))}catch(e){return 0}}
 
+// ==================== FPV 纹理（空心圆 + 十字准星）====================
+function createFPVTexture(){
+    let canvas=document.createElement('canvas');
+    canvas.width=32;
+    canvas.height=32;
+    let c=canvas.getContext('2d');
+    c.clearRect(0,0,32,32);
+    // 空心圆
+    c.beginPath();
+    c.arc(16,16,12,0,2*Math.PI);
+    c.strokeStyle=H.mainColor;
+    c.lineWidth=2;
+    c.stroke();
+    // 中心小点
+    c.beginPath();
+    c.arc(16,16,2,0,2*Math.PI);
+    c.fillStyle=H.mainColor;
+    c.fill();
+    // 十字准星
+    c.beginPath();
+    c.moveTo(16,4);
+    c.lineTo(16,8);
+    c.moveTo(16,24);
+    c.lineTo(16,28);
+    c.moveTo(4,16);
+    c.lineTo(8,16);
+    c.moveTo(24,16);
+    c.lineTo(28,16);
+    c.stroke();
+    return canvas.toDataURL();
+}
+
+// ==================== FPV 初始化 ====================
+function initFPV(){
+    try{
+        let viewer=window.geofs?.api?.viewer;
+        if(!viewer||!window.Cesium){setTimeout(initFPV,1000);return;}
+        let camLla=geofs.camera?.lla;
+        if(!camLla){setTimeout(initFPV,1000);return;}
+        let initPos=Cesium.Cartesian3.fromDegrees(camLla[1],camLla[0],camLla[2]);
+        fpvPoint=viewer.entities.add({
+            position:initPos,
+            billboard:{
+                image: createFPVTexture(),
+                scale:H.fpvScale,
+                color:Cesium.Color.fromCssColorString(H.mainColor),
+                show:H.fpvEnabled
+            }
+        });
+        lastCameraPos=initPos;
+        console.log('FPV已启动');
+    }catch(e){console.log('FPV启动失败:',e);}
+}
+
+// ==================== FPV 更新（自动高度开关）====================
+function updateFPV(){
+    if(!fpvPoint){requestAnimationFrame(updateFPV);return;}
+    try{
+        let camLla=geofs.camera?.lla;
+        if(!camLla){requestAnimationFrame(updateFPV);return;}
+        
+        // 获取离地高度，决定是否显示FPV
+        let agl = getAGL();
+        let autoShow = (agl < H.fpvAutoHeight && agl > 0);
+        let finalShow = H.fpvEnabled && autoShow;
+        
+        let currPos=Cesium.Cartesian3.fromDegrees(camLla[1],camLla[0],camLla[2]);
+        if(lastCameraPos){
+            let dx=currPos.x-lastCameraPos.x;
+            let dy=currPos.y-lastCameraPos.y;
+            let dz=currPos.z-lastCameraPos.z;
+            if(Math.abs(dx)>0.01||Math.abs(dy)>0.01||Math.abs(dz)>0.01){
+                fpvPoint.position=new Cesium.Cartesian3(
+                    currPos.x+H.fpvDistance*dx,
+                    currPos.y+H.fpvDistance*dy,
+                    currPos.z+H.fpvDistance*dz
+                );
+            }
+        }
+        lastCameraPos=currPos;
+        if(fpvPoint.billboard){
+            fpvPoint.billboard.color=Cesium.Color.fromCssColorString(H.mainColor);
+            fpvPoint.billboard.scale=H.fpvScale;
+            fpvPoint.show=finalShow;
+        }
+    }catch(e){}
+    requestAnimationFrame(updateFPV);
+}
+
+// ==================== HUD 绘制 ====================
 function draw(){
     if(!cv||!ctx||!H.v)return;
     cv.width=innerWidth;cv.height=innerHeight;
@@ -156,7 +257,7 @@ function draw(){
     ctx.scale(H.s,H.s);
     ctx.globalAlpha=H.o;
 
-    let s=spdMain(),a=altMain(),vs_=vs(),p=pitch(),r=roll(),hd=hdg(),g=gForce(),t=thrust();
+    let s=spdMain(),a=altMain(),vs_=vs(),p=-pitch(),r=roll(),hd=hdg(),g=gForce(),t=thrust();
     let cx=300,cy=200;
 
     // 倾斜角表盘
@@ -208,12 +309,11 @@ function draw(){
     ctx.fillText(Math.round(s),50,cy+10);
     ctx.font='12px monospace';
     ctx.fillText('kt',115,cy+10);
-    // 副速度显示
     ctx.font='12px monospace';
     ctx.textAlign='left';
-    let subSpd = spdSub();
-    let subLabel = H.mainSpd === 'TAS' ? 'GS' : 'TAS';
-    ctx.fillText(`${subLabel}: ${Math.round(subSpd)}`, 50, cy+40);
+    let subSpd=spdSub();
+    let subLabel=H.mainSpd==='TAS'?'GS':'TAS';
+    ctx.fillText(`${subLabel}: ${Math.round(subSpd)}`,50,cy+40);
     ctx.restore();
 
     // 高度带
@@ -243,75 +343,58 @@ function draw(){
     ctx.fillText(Math.round(a),540,cy+10);
     ctx.font='12px monospace';
     ctx.fillText('ft',610,cy+10);
-    // 副高度显示
-    let subAlt = altSub();
-    let subAltLabel = H.mainAlt === 'MSL' ? 'AGL' : 'MSL';
+    let subAlt=altSub();
+    let subAltLabel=H.mainAlt==='MSL'?'AGL':'MSL';
     ctx.font='12px monospace';
-    ctx.fillText(`${subAltLabel}: ${Math.round(subAlt)}`, 540, cy+40);
+    ctx.fillText(`${subAltLabel}: ${Math.round(subAlt)}`,540,cy+40);
     ctx.restore();
 
-    // 姿态仪（方向已校准）
+    // 姿态仪
     ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(r * Math.PI / 180);
-
-    // 间距映射：1=原5(最密), 3=标准, 5=最疏
-    let spacingMap = [0, 0.7, 0.85, 1.0, 1.15, 1.3];
-    let factor = spacingMap[H.pitchSpacing] || 1.0;
-    let basePxPerDegree = 3.6;
-    let pitchPx = p * factor * basePxPerDegree;
-    let lineSpacing = basePxPerDegree * factor;
-
+    ctx.translate(cx,cy);
+    ctx.rotate(r*Math.PI/180);
+    let spacingMap=[0,0.7,0.85,1.0,1.15,1.3];
+    let factor=spacingMap[H.pitchSpacing]||1.0;
+    let basePxPerDegree=3.6;
+    let pitchPx=p*factor*basePxPerDegree;
+    let lineSpacing=basePxPerDegree*factor;
     ctx.beginPath();
-    ctx.strokeStyle = H.mainColor;
-    ctx.lineWidth = 1.8;
-    ctx.font = 'bold 12px monospace';
-    ctx.fillStyle = H.mainColor;
-    ctx.textAlign = 'center';
-
-    let step = H.pitchStep;
-    let bigStep = step * 3;
-    for (let d = -90; d <= 90; d += step) {
-        // 抬头(p为正)时线向下移动，低头(p为负)时线向上移动
-        let y = pitchPx - (d / step) * lineSpacing * step;
-
-        // 渐隐效果
-        let distanceFromCenter = Math.abs(y - pitchPx) / 200;
-        let alpha = Math.max(0.1, 1 - distanceFromCenter * 0.9);
-        if (Math.abs(y) > 160) {
-            alpha = Math.max(0, alpha * (1 - (Math.abs(y) - 160) / 40));
-        }
-        if (Math.abs(y) > 200) continue;
-
-        ctx.globalAlpha = H.o * alpha;
-
-        let len = 28;
-        if (d % bigStep === 0) {
-            len = 85;
-            if (d === 0) len = 110;
-        } else {
-            len = 45;
-        }
-        ctx.moveTo(-len, y);
-        ctx.lineTo(len, y);
+    ctx.strokeStyle=H.mainColor;
+    ctx.lineWidth=1.8;
+    ctx.font='bold 12px monospace';
+    ctx.fillStyle=H.mainColor;
+    ctx.textAlign='center';
+    let step=H.pitchStep;
+    let bigStep=step*3;
+    for(let d=-90;d<=90;d+=step){
+        let y=pitchPx-(d/step)*lineSpacing*step;
+        let distanceFromCenter=Math.abs(y-pitchPx)/200;
+        let alpha=Math.max(0.1,1-distanceFromCenter*0.9);
+        if(Math.abs(y)>160){alpha=Math.max(0,alpha*(1-(Math.abs(y)-160)/40));}
+        if(Math.abs(y)>200)continue;
+        ctx.globalAlpha=H.o*alpha;
+        let len=28;
+        if(d%bigStep===0){len=85;if(d===0)len=110;}
+        else{len=45;}
+        ctx.moveTo(-len,y);
+        ctx.lineTo(len,y);
         ctx.stroke();
-
-        if (d !== 0 && d % bigStep === 0) {
-            ctx.fillText(d.toString(), -len - 18, y + 4);
-            ctx.fillText(d.toString(), len + 18, y + 4);
+        if(d!==0&&d%bigStep===0){
+            ctx.fillText(d.toString(),-len-18,y+4);
+            ctx.fillText(d.toString(),len+18,y+4);
         }
-        if (d === 0) {
-            ctx.fillText('0', -85, y - 5);
-            ctx.fillText('0', 85, y - 5);
+        if(d===0){
+            ctx.fillText('0',-85,y-5);
+            ctx.fillText('0',85,y-5);
         }
     }
-    ctx.globalAlpha = H.o;
+    ctx.globalAlpha=H.o;
     ctx.restore();
 
     // 十字架
-    let crossAlpha = Math.min(1.0, H.o + 0.25);
+    let crossAlpha=Math.min(1.0,H.o+0.25);
     ctx.save();
-    ctx.translate(cx, cy);
+    ctx.translate(cx,cy);
     ctx.beginPath();
     ctx.moveTo(-28,0);
     ctx.lineTo(28,0);
@@ -328,7 +411,7 @@ function draw(){
     ctx.globalCompositeOperation='source-over';
     ctx.restore();
 
-    // 垂直速度/G力/推力
+    // 其他信息
     ctx.save();
     ctx.font='13px monospace';
     ctx.fillStyle=H.mainColor;
@@ -340,7 +423,6 @@ function draw(){
     ctx.fillText('推力 '+t+'%',cx+70,cy+115);
     ctx.restore();
 
-    // 航向
     ctx.save();
     ctx.font='bold 22px monospace';
     ctx.fillStyle=H.mainColor;
@@ -349,7 +431,6 @@ function draw(){
     ctx.fillText(Math.round(hd).toString()+'°',cx+200,cy+90);
     ctx.restore();
 
-    // 航向罗盘
     ctx.save();
     ctx.translate(cx,cy+180);
     let cw=340;
@@ -368,22 +449,22 @@ function draw(){
     ctx.beginPath();ctx.moveTo(0,8);ctx.lineTo(-10,20);ctx.lineTo(10,20);ctx.fill();
     ctx.restore();
 
-    // 版本信息
     ctx.save();
     ctx.font='10px monospace';
     ctx.fillStyle=H.mainColor;
     ctx.textAlign='left';
     ctx.globalAlpha=H.o;
-    ctx.fillText('HUD v5.8.0',cx+200,cy+115);
+    ctx.fillText('HUD v9.0.0',cx+200,cy+115);
     ctx.restore();
 
     ctx.restore();
 }
 
+// ==================== 设置面板 ====================
 function showPanel(){
     if(panel){panel.remove();panel=null;return;}
     panel=document.createElement('div');
-    panel.style.cssText='position:fixed;top:20px;left:20px;background:rgba(20,20,35,0.95);backdrop-filter:blur(12px);padding:16px;border-radius:12px;z-index:100010;min-width:340px;border:1px solid #4caf50;color:#fff;';
+    panel.style.cssText='position:fixed;top:20px;left:20px;background:rgba(20,20,35,0.95);backdrop-filter:blur(12px);padding:16px;border-radius:12px;z-index:100010;min-width:380px;border:1px solid #4caf50;color:#fff;';
     panel.innerHTML=`
         <div style="text-align:center;margin-bottom:12px;"><span style="font-size:18px;">⚙️ HUD设置</span></div>
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>预设</span><select id="pre"><option value="center_no_ads">无广告中央</option><option value="center_ads">有广告中央</option><option value="top_left">左上角</option></select></label></div>
@@ -395,10 +476,19 @@ function showPanel(){
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>高度带滚动(x10)</span><input type="range" id="alt_s" min="0.5" max="5.0" step="0.1" style="flex:1;margin:0 10px;"><input type="number" id="alt_n" step="0.1" style="width:55px;"></label></div>
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>姿态仪单格角度</span><select id="pitchStep" style="width:80px;"><option value="5" ${H.pitchStep===5?'selected':''}>5度</option><option value="10" ${H.pitchStep===10?'selected':''}>10度</option></select></label></div>
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>姿态仪线条间距</span><input type="range" id="pitchSpacing" min="1" max="5" step="1" value="${H.pitchSpacing}" style="flex:1;margin:0 10px;"><input type="number" id="pitchSpacingN" step="1" style="width:55px;"></label><div style="font-size:9px;color:#888;">1最密 3标准 5最疏</div></div>
+        <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>⚡ HUD帧率</span><select id="hudFrameRate" style="width:100px;"><option value="10" ${H.hudFrameRate===10?'selected':''}>10 fps</option><option value="20" ${H.hudFrameRate===20?'selected':''}>20 fps</option><option value="30" ${H.hudFrameRate===30?'selected':''}>30 fps</option></select></label></div>
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>背景框</span><input type="checkbox" id="bg" ${H.bg?'checked':''} style="width:20px;"></label></div>
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>📊 速度带主显示</span><select id="mainSpd" style="width:100px;"><option value="TAS" ${H.mainSpd==='TAS'?'selected':''}>真空速 (TAS)</option><option value="GS" ${H.mainSpd==='GS'?'selected':''}>地速 (GS)</option></select></label><div style="font-size:9px;color:#888;margin-top:-4px;margin-bottom:6px;">另一种速度以小字显示</div></div>
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>🗻 高度带主显示</span><select id="mainAlt" style="width:100px;"><option value="MSL" ${H.mainAlt==='MSL'?'selected':''}>海拔 (MSL)</option><option value="AGL" ${H.mainAlt==='AGL'?'selected':''}>离地 (AGL)</option></select></label><div style="font-size:9px;color:#888;margin-top:-4px;margin-bottom:6px;">另一种高度以小字显示</div></div>
         <div><label style="display:flex;justify-content:space-between;margin-bottom:6px;"><span>🎨 HUD主色</span><input type="color" id="mainColor" value="${H.mainColor}" style="width:60px;"></label></div>
+        <div style="margin-top:8px;border-top:1px solid #444;padding-top:8px;">
+            <div style="font-weight:bold;margin-bottom:6px;">🎯 飞行路径矢量(FPV)</div>
+            <div><label style="display:flex;justify-content:space-between;"><span>启用FPV</span><input type="checkbox" id="fpvEnable" ${H.fpvEnabled?'checked':''}></label></div>
+            <div><label style="display:flex;justify-content:space-between;"><span>FPV大小</span><input type="range" id="fpvScale" min="0.3" max="1.2" step="0.05" value="${H.fpvScale}" style="flex:1;margin:0 10px;"><input type="number" id="fpvScaleN" step="0.05" value="${H.fpvScale}" style="width:55px;"></label></div>
+            <div><label style="display:flex;justify-content:space-between;"><span>预测距离</span><input type="range" id="fpvDistance" min="5" max="30" step="1" value="${H.fpvDistance}" style="flex:1;margin:0 10px;"><input type="number" id="fpvDistanceN" step="1" value="${H.fpvDistance}" style="width:55px;"></label></div>
+            <div><label style="display:flex;justify-content:space-between;"><span>📏 FPV显示高度(英尺)</span><input type="range" id="fpvAutoHeight" min="1000" max="10000" step="500" value="${H.fpvAutoHeight}" style="flex:1;margin:0 10px;"><input type="number" id="fpvAutoHeightN" step="500" value="${H.fpvAutoHeight}" style="width:70px;"></label></div>
+            <div style="font-size:9px;color:#888;">低于此高度时自动显示FPV</div>
+        </div>
         <div style="margin-top:12px;padding-top:8px;border-top:1px solid #444;text-align:center;font-size:11px;">
             📌 哔哩哔哩 <a href="${AUTHOR_URL}" target="_blank" style="color:#4caf50;text-decoration:none;">@不宅的飞友</a> 制作<br>
             <span style="font-size:9px;color:#888;">开源免费 · 禁止倒卖 · 欢迎分享</span>
@@ -411,12 +501,16 @@ function showPanel(){
     document.body.appendChild(panel);
 
     let preS=document.getElementById('pre'),xS=document.getElementById('x_s'),xN=document.getElementById('x_n'),yS=document.getElementById('y_s'),yN=document.getElementById('y_n');
-让SS=文档。getElementById('s_s')，sN=文档。getElementById('s_n')，oS=文档。getElementById('o_s')，oN=文档。getElementById('o_n')；
+    let sS=document.getElementById('s_s'),sN=document.getElementById('s_n'),oS=document.getElementById('o_s'),oN=document.getElementById('o_n');
     let spdS=document.getElementById('spd_s'),spdN=document.getElementById('spd_n'),altS=document.getElementById('alt_s'),altN=document.getElementById('alt_n');
     let pitchStepS=document.getElementById('pitchStep'),pitchSpacingS=document.getElementById('pitchSpacing'),pitchSpacingN=document.getElementById('pitchSpacingN');
     let bgC=document.getElementById('bg');
     let mainSpdS=document.getElementById('mainSpd'),mainAltS=document.getElementById('mainAlt');
     let mainColorC=document.getElementById('mainColor');
+    let hudFrameRateS=document.getElementById('hudFrameRate');
+    let fpvEnableC=document.getElementById('fpvEnable'),fpvScaleS=document.getElementById('fpvScale'),fpvScaleN=document.getElementById('fpvScaleN');
+    let fpvDistanceS=document.getElementById('fpvDistance'),fpvDistanceN=document.getElementById('fpvDistanceN');
+    let fpvAutoHeightS=document.getElementById('fpvAutoHeight'),fpvAutoHeightN=document.getElementById('fpvAutoHeightN');
 
     xS.value=H.x;xN.value=H.x;yS.value=H.y;yN.value=H.y;sS.value=H.s;sN.value=H.s;oS.value=H.o;oN.value=H.o;
     spdS.value=H.spdScroll;spdN.value=H.spdScroll;
@@ -425,6 +519,10 @@ function showPanel(){
     bgC.checked=H.bg;preS.value=H.pre;
     mainSpdS.value=H.mainSpd;mainAltS.value=H.mainAlt;
     mainColorC.value=H.mainColor;
+    hudFrameRateS.value=H.hudFrameRate;
+    fpvEnableC.checked=H.fpvEnabled;fpvScaleS.value=H.fpvScale;fpvScaleN.value=H.fpvScale;
+    fpvDistanceS.value=H.fpvDistance;fpvDistanceN.value=H.fpvDistance;
+    fpvAutoHeightS.value=H.fpvAutoHeight;fpvAutoHeightN.value=H.fpvAutoHeight;
 
     function upd(){
         H.x=parseInt(xS.value)||0;H.y=parseInt(yS.value)||100;H.s=parseFloat(sS.value)||1.4;H.o=parseFloat(oS.value)||0.5;
@@ -436,10 +534,19 @@ function showPanel(){
         H.mainSpd=mainSpdS.value;
         H.mainAlt=mainAltS.value;
         H.mainColor=mainColorC.value;
+        H.hudFrameRate=parseInt(hudFrameRateS.value)||30;
+        H.fpvEnabled=fpvEnableC.checked;
+        H.fpvScale=parseFloat(fpvScaleS.value)||0.5;
+        H.fpvDistance=parseInt(fpvDistanceS.value)||15;
+        H.fpvAutoHeight=parseInt(fpvAutoHeightS.value)||5000;
         xN.value=H.x;yN.value=H.y;sN.value=H.s;oN.value=H.o;spdN.value=H.spdScroll;altN.value=H.altScroll*10;
         pitchSpacingN.value=H.pitchSpacing;
+        fpvScaleN.value=H.fpvScale;fpvDistanceN.value=H.fpvDistance;fpvAutoHeightN.value=H.fpvAutoHeight;
+        if(fpvPoint&&fpvPoint.billboard){
+            fpvPoint.billboard.scale=H.fpvScale;
+            fpvPoint.billboard.color=Cesium.Color.fromCssColorString(H.mainColor);
+        }
         H.pre='custom';
-        draw();
     }
 
     xS.oninput=()=>{xN.value=xS.value;upd()};xN.oninput=()=>{xS.value=xN.value;upd()};
@@ -452,69 +559,78 @@ function showPanel(){
     pitchSpacingS.oninput=()=>{pitchSpacingN.value=pitchSpacingS.value;upd()};
     pitchSpacingN.oninput=()=>{pitchSpacingS.value=pitchSpacingN.value;upd()};
     bgC.onchange=upd;
-    mainSpdS.onchange=upd;mainAlts.onchange=upd;
+    mainSpdS.onchange=upd;mainAltS.onchange=upd;
     mainColorC.oninput=upd;
+    hudFrameRateS.onchange=upd;
+    fpvEnableC.onchange=upd;
+    fpvScaleS.oninput=()=>{fpvScaleN.value=fpvScaleS.value;upd()};
+    fpvScaleN.oninput=()=>{fpvScaleS.value=fpvScaleN.value;upd()};
+    fpvDistanceS.oninput=()=>{fpvDistanceN.value=fpvDistanceS.value;upd()};
+    fpvDistanceN.oninput=()=>{fpvDistanceS.value=fpvDistanceN.value;upd()};
+    fpvAutoHeightS.oninput=()=>{fpvAutoHeightN.value=fpvAutoHeightS.value;upd()};
+    fpvAutoHeightN.oninput=()=>{fpvAutoHeightS.value=fpvAutoHeightN.value;upd()};
 
-    Pres.onchange=(e)=>{
-        让 p=e.target.价值;
-        如果(P[p]){
-            让 预设=P[p];
-            让 nx=预设.getX?.(innerWidth)||预设.x;
-            xS.价值=nx;xN.价值=nx;
-            yS.价值=预设.y;yN.价值=预设.y;
-            sS.价值=预设.s;sN.价值=预设.s;
-            oS.价值=预设.o;oN.价值=预设.o;
-            SPDs.价值=预设.spdScroll;spdn.价值=预设.spdScroll;
-            alts.价值=预设.altScroll*10;ALTN.价值=预设.altScroll*10;
-            pitchStepS.价值=预设.pitchStep||5;
-            pitchSpacingS.价值=预设.间距间距||3;pitchSpacingN.价值=预设.间距间距||3;
-            BGC.检查=预设.BG;
-mainSpdS.价值=预设.mainSpd||'TAS'；
-mainAlts.价值=预设.mainAlt||'MSL'；
-mainColorC.价值=预设.mainColor||'#14be00'；
-UPD()；H.预=p；
+    preS.onchange=(e)=>{
+        let p=e.target.value;
+        if(P[p]){
+            let preset=P[p];
+            let nx=preset.getX?.(innerWidth)||preset.x;
+            xS.value=nx;xN.value=nx;yS.value=preset.y;yN.value=preset.y;sS.value=preset.s;sN.value=preset.s;
+            oS.value=preset.o;oN.value=preset.o;spdS.value=preset.spdScroll;spdN.value=preset.spdScroll;
+            altS.value=preset.altScroll*10;altN.value=preset.altScroll*10;
+            pitchStepS.value=preset.pitchStep||5;pitchSpacingS.value=preset.pitchSpacing||3;pitchSpacingN.value=preset.pitchSpacing||3;
+            bgC.checked=preset.bg;mainSpdS.value=preset.mainSpd||'TAS';mainAltS.value=preset.mainAlt||'MSL';
+            mainColorC.value=preset.mainColor||'#14be00';hudFrameRateS.value=preset.hudFrameRate||30;
+            fpvEnableC.checked=preset.fpvEnabled!==undefined?preset.fpvEnabled:true;
+            fpvScaleS.value=preset.fpvScale||0.5;fpvScaleN.value=preset.fpvScale||0.5;
+            fpvDistanceS.value=preset.fpvDistance||15;fpvDistanceN.value=preset.fpvDistance||15;
+            fpvAutoHeightS.value=preset.fpvAutoHeight||5000;fpvAutoHeightN.value=preset.fpvAutoHeight||5000;
+            upd(); H.pre=p;
         }
     };
 
-文件。getElementById('重置').onClick=()=>{
-让def=P.center_no_ads；
-设nx=定义.getx？.(innerWidth)||定义.x；
-XS.值=NX；xN.值=NX；yS.值=定义.y；yn.值=定义.y；SS.值=定义.s；sN.值=定义.s；
-操作系统。value=定义.O；o ON.值=定义.O；电涌保护器.值=定义.spdScroll；spdn.价值=定义.spdScroll；
-alts.价值=定义.altScroll*10；ALTN.值=定义.altScroll*10；
-pitchStepS.值=5；pitchSpacingS.值=3；pitchSpacingN.值=3；
-BGC.检查=定义.bg；
-mainSpdS.价值='TAS'；mainAlts.价值='MSL'；
-mainColorC.价值='#14be00'；
-UPD()；Pres.价值='center_no_ads'；H.预='center_no_ads'；
+    document.getElementById('reset').onclick=()=>{
+        let def=P.center_no_ads;
+        let nx=def.getX?.(innerWidth)||def.x;
+        xS.value=nx;xN.value=nx;yS.value=def.y;yN.value=def.y;sS.value=def.s;sN.value=def.s;
+        oS.value=def.o;oN.value=def.o;spdS.value=def.spdScroll;spdN.value=def.spdScroll;
+        altS.value=def.altScroll*10;altN.value=def.altScroll*10;
+        pitchStepS.value=5;pitchSpacingS.value=3;pitchSpacingN.value=3;
+        bgC.checked=def.bg;mainSpdS.value='TAS';mainAltS.value='MSL';
+        mainColorC.value='#14be00';hudFrameRateS.value=30;
+        fpvEnableC.checked=true;fpvScaleS.value=0.5;fpvScaleN.value=0.5;
+        fpvDistanceS.value=15;fpvDistanceN.value=15;
+        fpvAutoHeightS.value=5000;fpvAutoHeightN.value=5000;
+        upd(); preS.value='center_no_ads'; H.pre='center_no_ads';
     };
 
-文件.getElementById('保存').onClick=()=>{
-节省()；
-面板.移除()；
-面板=null；
+    document.getElementById('save').onclick=()=>{
+        save();
+        panel.remove();
+        panel=null;
     };
 }
 
-函数init(){
-负载()；
-简历=文件。createElement('画布')；简历。身份标识='geo-hud-canvas'；=文件。createElement('画布')；cv.身份标识='geo-hud-canvas'；
-资历，风格。cssText='位置：固定；顶部：0；左侧：0；宽度：100%；高度：100%；指针事件：无；z索引：99999；'；
-简历.宽度=innerWidth；cv.高度=innerHeight；
-CTX=简历.getContext('2d')；文档。身体。appendChild(简历)；
-文件.addEventListener('按下键'，(e)=>{
-let标记=文件.activeElement？.标记名||"；
-如果(标签==='输入'||标签==='TEXTAREA')返回；
-如果(e.钥匙==='L'||e.钥匙==='L'){
-如果(e.转变键){e.proventDefault()；showPanel()；}
-});
-其他{e.proventDefault()；H.V=！H.v；如果(简历)简历.风格。显示=H.V？'块'：'无'；}
+// ==================== 初始化 ====================
+let lastDraw=0;
+function anim(now){
+    let interval=Math.floor(1000/H.hudFrameRate);
+    if(now-lastDraw>=interval){
+        draw();
+        lastDraw=now;
+    }
+    requestAnimationFrame(anim);
 }
-如果(e.转变键){e.proventDefault()；showPanel()；}
-窗户。addEventListener('调整大小'，()=>{如果(简历){简历.宽度=innerWidth；cv.高度=innerHeight}如果(H.预&&P[H.预]){H.X=P[H.预].getx？.(innerWidth)||P[H.预].x；保存()}})；
-(函数Anim(){画()；requestAnimationFrame(Anim)})()；函数Anim(){画()；requestAnimationFrame(Anim)})()；
-控制台.日志('%c${COPYRIGHT}'，'color：#4caf50；font-size:14px；font-weight:bold；')；.日志('%c${COPYRIGHT}'，'color：#4caf50；font-size:14px；font-weight:bold；')；
-控制台.'L'('%cGeoFSHUDV5.8.0|姿态方向最终修复|拉杆抬头线向下'，'color：#ff9800；font-大小:12px；')；.日志('%cGeoFSHUDV5.8.0|姿态方向最终修复|拉杆抬头线向下'，'color：#ff9800；font-大小:12px；')；
-}
-功能wait(){交流电()？初始化()：setTimeout(等等，500)}等待(){交流电()？初始化()：setTimeout(等等，500)}等待()；
-})();)();)();)();
+
+function init(){
+    load();
+    cv=document.createElement('canvas');cv.id='geo-hud-canvas';
+    cv.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:99999;';
+    cv.width=innerWidth;cv.height=innerHeight;
+    ctx=cv.getContext('2d');document.body.appendChild(cv);
+    
+    // 启动HUD动画
+    requestAnimationFrame(anim);
+    
+    // 延迟启动FPV，等待Cesium完全就绪
+    setTimeout(()=>{initFPV(); updateFPV();},
